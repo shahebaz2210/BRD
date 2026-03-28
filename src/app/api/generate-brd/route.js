@@ -8,95 +8,64 @@ const DEEPSEEK_URL = 'https://api.deepseek.com/v1/chat/completions';
 
 export async function POST(request) {
   try {
-    // Gather all messages from DB (or use provided data)
-    let messages = [];
-    let rawData = null;
-
-    const db = await connectDB();
-    if (db) {
-      try {
-        messages = await Message.find().sort({ createdAt: -1 }).limit(50).lean();
-      } catch {
-        // DB error, proceed with mock
-      }
-    }
-
-    // Build a summary of all collected requirements
-    const allFunctional = [];
-    const allNonFunctional = [];
-    const allActors = new Set();
-    const allFeatures = new Set();
-    const allText = [];
-
-    messages.forEach(msg => {
-      allText.push(msg.content);
-      (msg.requirements?.functional || []).forEach(r => allFunctional.push(r));
-      (msg.requirements?.non_functional || []).forEach(r => allNonFunctional.push(r));
-      (msg.requirements?.actors || []).forEach(a => allActors.add(a));
-      (msg.requirements?.features || []).forEach(f => allFeatures.add(f));
-    });
-
-    const requirementsSummary = {
-      functional_requirements: allFunctional,
-      non_functional_requirements: allNonFunctional,
-      actors: [...allActors],
-      features: [...allFeatures],
-      raw_text: allText.join('\n\n'),
-    };
+    const body = await request.json();
+    
+    // ═══ NEW: Accept unified analysis data with conflict resolutions ═══
+    const {
+      unifiedRequirements,     // pre-analyzed unified requirements from analyze-sources
+      conflictResolutions,     // user's choices for each conflict: { conflictId: chosenOptionIndex }
+      sourceTexts,             // combined text from all sources
+      projectName,             // identified project name
+    } = body;
 
     let brdContent;
-    // Always try DeepSeek first, fall back gracefully on any error
     const hasKey = DEEPSEEK_API_KEY && DEEPSEEK_API_KEY !== 'your_deepseek_api_key_here';
 
-    if (hasKey) {
-      const systemPrompt = `You are a senior Business Analyst. Generate a comprehensive, professional Business Requirements Document (BRD) from the provided requirements data.\n\nReturn ONLY a valid JSON object (no markdown, no code fences) with this structure:\n{\n  "title": "Project title",\n  "project_name": "Project name",\n  "executive_summary": "2-3 paragraph executive summary",\n  "project_scope": "Detailed project scope description",\n  "actors": [{"name": "...", "description": "..."}],\n  "functional_requirements": [\n    {"id": "FR-001", "description": "...", "priority": "High/Medium/Low", "category": "..."}\n  ],\n  "non_functional_requirements": [\n    {"id": "NFR-001", "description": "...", "priority": "High/Medium/Low"}\n  ],\n  "moscow": {\n    "must_have": ["..."],\n    "should_have": ["..."],
-    "could_have": ["..."],\n    "wont_have": ["..."]\n  },\n  "assumptions": ["..."],\n  "constraints": ["..."],\n  "acceptance_criteria": ["..."]\n}`;
-
-      const userMsg = messages.length > 0
-        ? `Generate a BRD from these collected requirements:\n\n${JSON.stringify(requirementsSummary, null, 2)}`
-        : `Generate a sample/demo BRD for a modern web application project.`;
-
-      try {
-        const response = await fetch(DEEPSEEK_URL, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'deepseek-chat',
-            messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMsg }],
-            temperature: 0.4,
-            max_tokens: 6000,
-          }),
-        });
-
-        if (!response.ok) {
-          console.warn(`DeepSeek returned ${response.status} — using mock BRD`);
-          brdContent = generateMockBrd(requirementsSummary);
-        } else {
-          const data = await response.json();
-          const content = data.choices?.[0]?.message?.content || '';
-          let jsonStr = content;
-          const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-          if (jsonMatch) jsonStr = jsonMatch[1];
-          try {
-            brdContent = JSON.parse(jsonStr.trim());
-          } catch {
-            const start = content.indexOf('{');
-            const end = content.lastIndexOf('}');
-            brdContent = (start !== -1 && end !== -1) ? JSON.parse(content.slice(start, end + 1)) : generateMockBrd(requirementsSummary);
-          }
+    // ── If we have unified analysis data from the new flow ──
+    if (unifiedRequirements) {
+      if (hasKey) {
+        try {
+          brdContent = await generateUnifiedBrdWithDeepSeek(
+            unifiedRequirements,
+            conflictResolutions || {},
+            sourceTexts || '',
+            projectName || 'Software Project'
+          );
+        } catch (err) {
+          console.warn('DeepSeek unified BRD failed, using smart builder:', err.message);
+          brdContent = buildUnifiedBrdFromAnalysis(unifiedRequirements, conflictResolutions || {}, projectName);
         }
-      } catch (err) {
-        console.warn('DeepSeek call failed — using mock BRD:', err.message);
-        brdContent = generateMockBrd(requirementsSummary);
+      } else {
+        brdContent = buildUnifiedBrdFromAnalysis(unifiedRequirements, conflictResolutions || {}, projectName);
       }
     } else {
-      brdContent = generateMockBrd(requirementsSummary);
+      // ── Legacy flow: gather from DB ──
+      let messages = [];
+      const db = await connectDB();
+      if (db) {
+        try {
+          messages = await Message.find().sort({ createdAt: -1 }).limit(50).lean();
+        } catch { /* DB error */ }
+      }
+
+      const requirementsSummary = buildRequirementsSummary(messages);
+
+      if (hasKey) {
+        try {
+          brdContent = await generateBrdWithDeepSeek(requirementsSummary, messages.length > 0);
+        } catch (err) {
+          console.warn('DeepSeek BRD failed:', err.message);
+          brdContent = generateSmartBrd(requirementsSummary);
+        }
+      } else {
+        brdContent = generateSmartBrd(requirementsSummary);
+      }
     }
 
-    // Save BRD to MongoDB
+    // ── Save BRD to MongoDB ──
     const brdData = {
       title: brdContent.title || 'Business Requirements Document',
-      projectName: brdContent.project_name || brdContent.title,
+      projectName: brdContent.project_name || projectName || brdContent.title,
       version: '1.0',
       content: {
         executive_summary: brdContent.executive_summary,
@@ -110,11 +79,11 @@ export async function POST(request) {
         acceptance_criteria: brdContent.acceptance_criteria || [],
       },
       status: 'draft',
-      rawText: requirementsSummary.raw_text,
-      messageIds: messages.map(m => m._id).filter(Boolean),
+      rawText: sourceTexts || '',
     };
 
     let savedBrd;
+    const db = await connectDB();
     if (db) {
       try {
         savedBrd = await Brd.create(brdData);
@@ -126,7 +95,7 @@ export async function POST(request) {
     return NextResponse.json({
       success: true,
       brd: {
-        id: savedBrd?._id?.toString() || `demo-${Date.now()}`,
+        id: savedBrd?._id?.toString() || `brd-${Date.now()}`,
         ...brdData,
         createdAt: savedBrd?.createdAt || new Date().toISOString(),
       },
@@ -138,8 +107,201 @@ export async function POST(request) {
   }
 }
 
+// ════════════════════════════════════════════
+//  NEW: Generate BRD from unified analysis + conflict resolutions
+// ════════════════════════════════════════════
+async function generateUnifiedBrdWithDeepSeek(unifiedReqs, resolutions, sourceTexts, projectName) {
+  // Apply conflict resolutions to the prompt
+  let conflictContext = '';
+  if (Object.keys(resolutions).length > 0) {
+    conflictContext = `\n\nThe user has resolved the following conflicts:\n`;
+    for (const [conflictId, resolution] of Object.entries(resolutions)) {
+      conflictContext += `- ${conflictId}: User chose "${resolution.chosen}" (from ${resolution.source})\n`;
+    }
+  }
+
+  const systemPrompt = `You are a senior Business Analyst. Generate a comprehensive, professional Business Requirements Document (BRD) from the analyzed requirements data.
+
+This data has been consolidated from MULTIPLE sources (emails, chats, meeting transcripts, uploaded documents). The requirements have already been unified and any conflicts have been resolved by the user.
+${conflictContext}
+
+Return ONLY a valid JSON object (no markdown, no code fences) with this structure:
+{
+  "title": "Business Requirements Document",
+  "project_name": "${projectName}",
+  "executive_summary": "2-3 paragraph executive summary mentioning data was consolidated from multiple sources",
+  "project_scope": "Detailed project scope description",
+  "actors": [{"name": "...", "description": "..."}],
+  "functional_requirements": [
+    {"id": "FR-001", "description": "...", "priority": "High/Medium/Low", "category": "..."}
+  ],
+  "non_functional_requirements": [
+    {"id": "NFR-001", "description": "...", "priority": "High/Medium/Low"}
+  ],
+  "moscow": {
+    "must_have": ["..."],
+    "should_have": ["..."],
+    "could_have": ["..."],
+    "wont_have": ["..."]
+  },
+  "assumptions": ["..."],
+  "constraints": ["..."],
+  "acceptance_criteria": ["..."]
+}`;
+
+  const response = await fetch(DEEPSEEK_URL, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'deepseek-chat',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Generate a unified BRD from these consolidated requirements:\n\n${JSON.stringify(unifiedReqs, null, 2).slice(0, 6000)}` },
+      ],
+      temperature: 0.4,
+      max_tokens: 6000,
+    }),
+  });
+
+  if (!response.ok) throw new Error(`DeepSeek API returned ${response.status}`);
+
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content || '';
+  let jsonStr = content;
+  const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (jsonMatch) jsonStr = jsonMatch[1];
+  try {
+    return JSON.parse(jsonStr.trim());
+  } catch {
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    if (start !== -1 && end !== -1) return JSON.parse(content.slice(start, end + 1));
+    throw new Error('Could not parse DeepSeek BRD response');
+  }
+}
+
+// ════════════════════════════════════════════
+//  Build BRD from unified analysis (no DeepSeek)
+// ════════════════════════════════════════════
+function buildUnifiedBrdFromAnalysis(unifiedReqs, resolutions, projectName) {
+  const frs = unifiedReqs.functional_requirements || [];
+  const nfrs = unifiedReqs.non_functional_requirements || [];
+  const actors = unifiedReqs.actors || [
+    { name: 'End User', description: 'Primary user of the system' },
+    { name: 'Admin', description: 'System administrator' },
+  ];
+
+  const highFRs = frs.filter(r => r.priority === 'High').map(r => r.description);
+  const medFRs = frs.filter(r => r.priority === 'Medium').map(r => r.description);
+  const lowFRs = frs.filter(r => r.priority === 'Low').map(r => r.description);
+
+  return {
+    title: 'Business Requirements Document',
+    project_name: projectName || unifiedReqs.project_title || 'Software Project',
+    executive_summary: `This Business Requirements Document consolidates requirements gathered from multiple communication sources including emails, chat conversations, meeting transcripts, and uploaded documents. The AI-powered analysis pipeline has identified, deduplicated, and unified all requirements into a single coherent document.\n\nThe project "${projectName || unifiedReqs.project_title}" encompasses ${frs.length} functional requirements and ${nfrs.length} non-functional requirements. ${Object.keys(resolutions).length > 0 ? `${Object.keys(resolutions).length} conflict(s) between sources were identified and resolved by the project stakeholders.` : 'No conflicts were detected between the sources.'}`,
+    project_scope: `The project covers the development of a comprehensive ${(projectName || unifiedReqs.project_title || '').toLowerCase()} with core user-facing features and administrative capabilities. Requirements have been extracted from ${frs.length > 0 ? 'real stakeholder communications' : 'provided inputs'} and prioritized using the MoSCoW framework.`,
+    actors,
+    functional_requirements: frs.map((fr, i) => ({
+      id: fr.id || `FR-${String(i + 1).padStart(3, '0')}`,
+      description: fr.description,
+      priority: fr.priority || 'Medium',
+      category: fr.category || 'Core',
+    })),
+    non_functional_requirements: nfrs.length > 0 ? nfrs : [
+      { id: 'NFR-001', description: 'System shall respond within 2 seconds under normal load', priority: 'High' },
+      { id: 'NFR-002', description: 'System shall support 1000+ concurrent users', priority: 'High' },
+      { id: 'NFR-003', description: 'All data encrypted using TLS 1.3', priority: 'High' },
+      { id: 'NFR-004', description: 'System shall maintain 99.9% uptime SLA', priority: 'Medium' },
+    ],
+    moscow: unifiedReqs.moscow || {
+      must_have: highFRs.slice(0, 4),
+      should_have: medFRs.slice(0, 3),
+      could_have: lowFRs.slice(0, 3),
+      wont_have: ['Mobile native app (v1)', 'AI chatbot', 'Offline mode'],
+    },
+    assumptions: [
+      'Users have access to modern web browsers.',
+      'Required third-party APIs will be available and stable.',
+      'Development team has necessary technical expertise.',
+      'Requirements consolidated from multiple sources represent stakeholder consensus.',
+    ],
+    constraints: [
+      'Project must be delivered within the agreed timeline.',
+      'Must comply with applicable data privacy regulations.',
+      'Budget limited to approved cloud service tiers.',
+    ],
+    acceptance_criteria: [
+      'All functional requirements pass acceptance testing.',
+      'System handles expected concurrent load without errors.',
+      'User interfaces are responsive across desktop and mobile.',
+      'Security audit passes with no critical vulnerabilities.',
+    ],
+  };
+}
+
+// ════════════════════════════════════════════
+//  Legacy helper functions
+// ════════════════════════════════════════════
+function buildRequirementsSummary(messages) {
+  const allFunctional = [];
+  const allNonFunctional = [];
+  const allActors = new Set();
+  const allFeatures = new Set();
+  const allText = [];
+
+  messages.forEach(msg => {
+    allText.push(msg.content);
+    (msg.requirements?.functional || []).forEach(r => allFunctional.push(r));
+    (msg.requirements?.non_functional || []).forEach(r => allNonFunctional.push(r));
+    (msg.requirements?.actors || []).forEach(a => allActors.add(a));
+    (msg.requirements?.features || []).forEach(f => allFeatures.add(f));
+  });
+
+  return {
+    functional_requirements: allFunctional,
+    non_functional_requirements: allNonFunctional,
+    actors: [...allActors],
+    features: [...allFeatures],
+    raw_text: allText.join('\n\n'),
+  };
+}
+
+async function generateBrdWithDeepSeek(requirementsSummary, hasMessages) {
+  const systemPrompt = `You are a senior Business Analyst. Generate a comprehensive, professional Business Requirements Document (BRD) from the provided requirements data.\n\nReturn ONLY a valid JSON object (no markdown, no code fences) with this structure:\n{\n  "title": "Project title",\n  "project_name": "Project name",\n  "executive_summary": "2-3 paragraph executive summary",\n  "project_scope": "Detailed project scope description",\n  "actors": [{"name": "...", "description": "..."}],\n  "functional_requirements": [\n    {"id": "FR-001", "description": "...", "priority": "High/Medium/Low", "category": "..."}\n  ],\n  "non_functional_requirements": [\n    {"id": "NFR-001", "description": "...", "priority": "High/Medium/Low"}\n  ],\n  "moscow": {\n    "must_have": ["..."],\n    "should_have": ["..."],\n    "could_have": ["..."],\n    "wont_have": ["..."]\n  },\n  "assumptions": ["..."],\n  "constraints": ["..."],\n  "acceptance_criteria": ["..."]\n}`;
+
+  const userMsg = hasMessages
+    ? `Generate a BRD from these collected requirements:\n\n${JSON.stringify(requirementsSummary, null, 2)}`
+    : `Generate a sample/demo BRD for a modern web application project.`;
+
+  const response = await fetch(DEEPSEEK_URL, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'deepseek-chat',
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMsg }],
+      temperature: 0.4,
+      max_tokens: 6000,
+    }),
+  });
+
+  if (!response.ok) throw new Error(`DeepSeek returned ${response.status}`);
+
+  const data = await response.json();
+  const content = data.choices?.[0]?.message?.content || '';
+  let jsonStr = content;
+  const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (jsonMatch) jsonStr = jsonMatch[1];
+  try {
+    return JSON.parse(jsonStr.trim());
+  } catch {
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    if (start !== -1 && end !== -1) return JSON.parse(content.slice(start, end + 1));
+    throw new Error('Could not parse DeepSeek BRD response');
+  }
+}
+
 function generateSmartBrd(data) {
-  // Build from real collected requirements if available
   const hasFRs = data.functional_requirements?.length > 0;
   const hasActors = data.actors?.length > 0;
 
@@ -151,71 +313,43 @@ function generateSmartBrd(data) {
         category: 'Core',
       }))
     : [
-        { id: 'FR-001', description: 'Users shall be able to register and log in using email/password or OAuth (Google)', priority: 'High', category: 'Authentication' },
-        { id: 'FR-002', description: 'Users shall be able to browse and search available services', priority: 'High', category: 'Core' },
-        { id: 'FR-003', description: 'Users shall be able to book services and receive confirmation', priority: 'High', category: 'Booking' },
-        { id: 'FR-004', description: 'Users shall receive real-time notifications for booking updates', priority: 'Medium', category: 'Notifications' },
-        { id: 'FR-005', description: 'System shall support payment processing via UPI and card payments', priority: 'High', category: 'Payment' },
-        { id: 'FR-006', description: 'Admin shall have a dashboard to view analytics and manage users', priority: 'High', category: 'Admin' },
-        { id: 'FR-007', description: 'Users shall be able to rate and review services', priority: 'Medium', category: 'Feedback' },
-        { id: 'FR-008', description: 'System shall generate reports for administrators', priority: 'Low', category: 'Reporting' },
+        { id: 'FR-001', description: 'Users shall be able to register and log in', priority: 'High', category: 'Auth' },
+        { id: 'FR-002', description: 'Users shall browse and search services', priority: 'High', category: 'Core' },
+        { id: 'FR-003', description: 'Users shall book services and get confirmation', priority: 'High', category: 'Booking' },
+        { id: 'FR-004', description: 'Real-time notifications for updates', priority: 'Medium', category: 'Notifications' },
+        { id: 'FR-005', description: 'Payment processing via UPI/cards', priority: 'High', category: 'Payment' },
+        { id: 'FR-006', description: 'Admin dashboard for analytics', priority: 'High', category: 'Admin' },
       ];
 
   const actors = hasActors
     ? data.actors.map(a => ({ name: typeof a === 'string' ? a : a.name, description: `${typeof a === 'string' ? a : a.name} of the system` }))
-    : [
-        { name: 'End User', description: 'Primary user who interacts with the platform to access services.' },
-        { name: 'Administrator', description: 'System administrator responsible for managing users and platform settings.' },
-        { name: 'Service Provider', description: 'Third-party entity that provides services listed on the platform.' },
-      ];
+    : [{ name: 'End User', description: 'Primary user' }, { name: 'Admin', description: 'System administrator' }];
 
   const highFRs = functionalReqs.filter(r => r.priority === 'High').map(r => r.description);
-  const medFRs  = functionalReqs.filter(r => r.priority === 'Medium').map(r => r.description);
-  const lowFRs  = functionalReqs.filter(r => r.priority === 'Low').map(r => r.description);
+  const medFRs = functionalReqs.filter(r => r.priority === 'Medium').map(r => r.description);
+  const lowFRs = functionalReqs.filter(r => r.priority === 'Low').map(r => r.description);
 
   return {
     title: 'Business Requirements Document',
     project_name: 'AI-Driven Service Platform',
-    executive_summary: 'This Business Requirements Document outlines the requirements for developing an AI-Driven Service Platform that enables users to access services through an intuitive web interface. The platform incorporates user authentication, real-time data processing, payment integration, and an administrative dashboard for managing operations. The system is designed to be scalable, secure, and deliver an exceptional user experience across all devices.\n\nThe requirements have been extracted from unstructured inputs using NLP and AI processing pipelines. The document represents the consolidated view of all stakeholder requirements gathered through Telegram, email, meeting transcripts, and client notes.',
-    project_scope: 'The project encompasses the development of a full-stack web application with a responsive frontend, RESTful API backend, MongoDB database integration, and third-party service connections. The initial release (v1.0) focuses on core user-facing features and essential administrative capabilities. Advanced features such as AI-powered recommendations and mobile native applications are planned for subsequent releases.',
+    executive_summary: 'This BRD outlines requirements for an AI-Driven Service Platform extracted from stakeholder communications using NLP and AI pipelines.',
+    project_scope: 'Full-stack web application with responsive frontend, API backend, MongoDB, and third-party integrations.',
     actors,
     functional_requirements: functionalReqs,
     non_functional_requirements: [
-      { id: 'NFR-001', description: 'System shall respond to user actions within 2 seconds under normal load', priority: 'High' },
-      { id: 'NFR-002', description: 'System shall support at least 1000 concurrent users without degradation', priority: 'High' },
-      { id: 'NFR-003', description: 'All data in transit shall be encrypted using TLS 1.3', priority: 'High' },
-      { id: 'NFR-004', description: 'System shall maintain 99.9% uptime SLA', priority: 'Medium' },
-      { id: 'NFR-005', description: 'Application shall be fully responsive across desktop, tablet, and mobile', priority: 'High' },
+      { id: 'NFR-001', description: 'Response time under 2 seconds', priority: 'High' },
+      { id: 'NFR-002', description: 'Support 1000+ concurrent users', priority: 'High' },
+      { id: 'NFR-003', description: 'TLS 1.3 encryption', priority: 'High' },
+      { id: 'NFR-004', description: '99.9% uptime SLA', priority: 'Medium' },
     ],
     moscow: {
-      must_have:   highFRs.slice(0, 4).length > 0 ? highFRs.slice(0, 4) : ['User registration & login', 'Core service functionality', 'Payment integration', 'Admin dashboard'],
-      should_have: medFRs.slice(0, 3).length > 0  ? medFRs.slice(0, 3)  : ['Email notifications', 'User reviews & ratings', 'Role-based access control'],
-      could_have:  lowFRs.slice(0, 3).length > 0  ? lowFRs.slice(0, 3)  : ['Dark mode', 'Analytics charts', 'Multi-language support'],
-      wont_have:   ['Mobile native app (v1)', 'AI chatbot integration', 'Offline mode', 'Blockchain integration'],
+      must_have: highFRs.slice(0, 4),
+      should_have: medFRs.slice(0, 3),
+      could_have: lowFRs.slice(0, 3),
+      wont_have: ['Mobile native app (v1)', 'AI chatbot', 'Offline mode'],
     },
-    assumptions: [
-      'Users will have access to modern web browsers (Chrome, Firefox, Safari, Edge).',
-      'Payment gateway APIs will be available and stable throughout the project.',
-      'MongoDB Atlas will be used for cloud database hosting.',
-      'The development team has expertise in Next.js and React.',
-    ],
-    constraints: [
-      'Project must be delivered within the academic semester timeline.',
-      'Budget is limited to free-tier and student-tier cloud services.',
-      'Must comply with applicable data privacy regulations (GDPR, IT Act).',
-      'System must work on standard internet connections (minimum 2 Mbps).',
-    ],
-    acceptance_criteria: [
-      'Users can successfully register, log in, and use core service functionality.',
-      'Admin dashboard displays at least 3 analytics metrics accurately.',
-      'Payment processing completes within 5 seconds for 95% of transactions.',
-      'System handles 100 concurrent users in load testing without errors.',
-      'PDF download generates a correctly formatted, complete BRD document.',
-      'NLP pipeline correctly extracts requirements from unstructured text inputs.',
-    ],
+    assumptions: ['Modern browsers available', 'APIs stable', 'Team has Next.js expertise'],
+    constraints: ['Academic timeline', 'Free-tier services', 'GDPR compliance'],
+    acceptance_criteria: ['Users can register & login', 'Admin dashboard works', 'Payments complete in 5s', 'Load test passes'],
   };
 }
-
-// Keep old name as alias for compatibility
-function generateMockBrd(data) { return generateSmartBrd(data); }
-

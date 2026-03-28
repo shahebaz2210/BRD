@@ -22,13 +22,13 @@ function nlpPreprocess(text) {
 
   // 3. Stop words list
   const stopWords = new Set([
-    'the','a','an','is','are','was','were','and','or','but','in','on','at',
-    'to','for','of','we','need','can','should','must','will','that','this',
-    'it','with','not','be','have','do','get','they','their','from','has',
-    'been','would','could','our','you','your','its','also','just','like',
-    'very','much','some','any','all','also','into','let','may','more','than',
-    'then','there','these','those','where','when','which','who','whom','how',
-    'what','why','now','new','use','used','using','able','want','way','make'
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'and', 'or', 'but', 'in', 'on', 'at',
+    'to', 'for', 'of', 'we', 'need', 'can', 'should', 'must', 'will', 'that', 'this',
+    'it', 'with', 'not', 'be', 'have', 'do', 'get', 'they', 'their', 'from', 'has',
+    'been', 'would', 'could', 'our', 'you', 'your', 'its', 'also', 'just', 'like',
+    'very', 'much', 'some', 'any', 'all', 'also', 'into', 'let', 'may', 'more', 'than',
+    'then', 'there', 'these', 'those', 'where', 'when', 'which', 'who', 'whom', 'how',
+    'what', 'why', 'now', 'new', 'use', 'used', 'using', 'able', 'want', 'way', 'make'
   ]);
 
   // 4. Extract keywords (TF-based, remove stop words)
@@ -57,17 +57,17 @@ function nlpPreprocess(text) {
 
   // 6. Priority signals
   const highSignals = ['urgent', 'critical', 'must', 'mandatory', 'required', 'asap', 'important', 'crucial'];
-  const lowSignals  = ['nice to have', 'optional', 'later', 'eventually', 'consider'];
+  const lowSignals = ['nice to have', 'optional', 'later', 'eventually', 'consider'];
   const hasHigh = highSignals.some(s => text.toLowerCase().includes(s));
-  const hasLow  = lowSignals.some(s => text.toLowerCase().includes(s));
+  const hasLow = lowSignals.some(s => text.toLowerCase().includes(s));
   const priority = hasHigh ? 'High' : hasLow ? 'Low' : 'Medium';
 
   // 7. Domain detection
   const domains = {
     ecommerce: ['cart', 'payment', 'product', 'order', 'checkout', 'buy', 'sell'],
     transport: ['bus', 'route', 'ticket', 'track', 'gps', 'location', 'trip'],
-    health:    ['patient', 'doctor', 'appointment', 'health', 'medicine', 'hospital'],
-    finance:   ['invoice', 'billing', 'account', 'transaction', 'bank', 'wallet'],
+    health: ['patient', 'doctor', 'appointment', 'health', 'medicine', 'hospital'],
+    finance: ['invoice', 'billing', 'account', 'transaction', 'bank', 'wallet'],
     education: ['student', 'course', 'grade', 'teacher', 'exam', 'assignment'],
   };
   let detectedDomain = 'General';
@@ -187,7 +187,7 @@ function nlpOnlyRequirements(text, nlpData) {
     description: s.trim(),
     priority: i < 3 ? 'High' : i < 6 ? 'Medium' : 'Low',
     category: detectedDomain === 'transport' ? 'Transport' :
-              detectedDomain === 'ecommerce' ? 'Commerce' : 'Core',
+      detectedDomain === 'ecommerce' ? 'Commerce' : 'Core',
   }));
 
   const nfrs = [
@@ -205,16 +205,16 @@ function nlpOnlyRequirements(text, nlpData) {
     features: keywords.slice(0, 6),
     tags: keywords.slice(0, 8),
     moscow: {
-      must_have:    frs.filter(r => r.priority === 'High').map(r => r.description).slice(0, 4),
-      should_have:  frs.filter(r => r.priority === 'Medium').map(r => r.description).slice(0, 3),
-      could_have:   frs.filter(r => r.priority === 'Low').map(r => r.description).slice(0, 3),
-      wont_have:    ['Third-party integrations (v2)', 'Native mobile app (v1)', 'Offline mode'],
+      must_have: frs.filter(r => r.priority === 'High').map(r => r.description).slice(0, 4),
+      should_have: frs.filter(r => r.priority === 'Medium').map(r => r.description).slice(0, 3),
+      could_have: frs.filter(r => r.priority === 'Low').map(r => r.description).slice(0, 3),
+      wont_have: ['Third-party integrations (v2)', 'Native mobile app (v1)', 'Offline mode'],
     },
     ambiguities: sentences.length < 2
       ? ['Input text is very brief — consider providing more detail']
       : keywords.length < 3
-      ? ['Very few keywords detected — input may need more context']
-      : [],
+        ? ['Very few keywords detected — input may need more context']
+        : [],
     priority,
     _mode: 'nlp_only',
   };
