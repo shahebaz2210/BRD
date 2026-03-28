@@ -16,6 +16,8 @@ export async function POST(request) {
       conflictResolutions,     // user's choices for each conflict: { conflictId: chosenOptionIndex }
       sourceTexts,             // combined text from all sources
       projectName,             // identified project name
+      isUpdateMode,            // true if updating an existing BRD
+      baseDocumentText,        // the original document text (for update mode)
     } = body;
 
     let brdContent;
@@ -29,14 +31,16 @@ export async function POST(request) {
             unifiedRequirements,
             conflictResolutions || {},
             sourceTexts || '',
-            projectName || 'Software Project'
+            projectName || 'Software Project',
+            isUpdateMode,
+            baseDocumentText
           );
         } catch (err) {
           console.warn('DeepSeek unified BRD failed, using smart builder:', err.message);
-          brdContent = buildUnifiedBrdFromAnalysis(unifiedRequirements, conflictResolutions || {}, projectName);
+          brdContent = buildUnifiedBrdFromAnalysis(unifiedRequirements, conflictResolutions || {}, projectName, isUpdateMode);
         }
       } else {
-        brdContent = buildUnifiedBrdFromAnalysis(unifiedRequirements, conflictResolutions || {}, projectName);
+        brdContent = buildUnifiedBrdFromAnalysis(unifiedRequirements, conflictResolutions || {}, projectName, isUpdateMode);
       }
     } else {
       // ── Legacy flow: gather from DB ──
@@ -66,7 +70,7 @@ export async function POST(request) {
     const brdData = {
       title: brdContent.title || 'Business Requirements Document',
       projectName: brdContent.project_name || projectName || brdContent.title,
-      version: '1.0',
+      version: isUpdateMode ? '2.0' : '1.0',
       content: {
         executive_summary: brdContent.executive_summary,
         project_scope: brdContent.project_scope,
@@ -110,7 +114,7 @@ export async function POST(request) {
 // ════════════════════════════════════════════
 //  NEW: Generate BRD from unified analysis + conflict resolutions
 // ════════════════════════════════════════════
-async function generateUnifiedBrdWithDeepSeek(unifiedReqs, resolutions, sourceTexts, projectName) {
+async function generateUnifiedBrdWithDeepSeek(unifiedReqs, resolutions, sourceTexts, projectName, isUpdateMode, baseDocumentText) {
   // Apply conflict resolutions to the prompt
   let conflictContext = '';
   if (Object.keys(resolutions).length > 0) {
@@ -120,10 +124,25 @@ async function generateUnifiedBrdWithDeepSeek(unifiedReqs, resolutions, sourceTe
     }
   }
 
+  let modeContext = '';
+  if (isUpdateMode && baseDocumentText) {
+    modeContext = `\n\nIMPORTANT: This is an UPDATE to an existing BRD. You must:
+1. PRESERVE all existing content from the base document
+2. ADD new requirements identified from the new sources
+3. MODIFY any existing requirements that have been updated by new data
+4. Mark new additions clearly in descriptions (you can prefix with "[NEW]" or "[UPDATED]")
+5. The version should be 2.0, and the executive summary should mention this is an updated version
+
+EXISTING BRD CONTENT (base document):
+${baseDocumentText.slice(0, 4000)}`;
+  }
+
   const systemPrompt = `You are a senior Business Analyst. Generate a comprehensive, professional Business Requirements Document (BRD) from the analyzed requirements data.
 
-This data has been consolidated from MULTIPLE sources (emails, chats, meeting transcripts, uploaded documents). The requirements have already been unified and any conflicts have been resolved by the user.
-${conflictContext}
+${isUpdateMode 
+  ? 'This is an INCREMENTAL UPDATE to an existing BRD document. New data has been collected from additional sources and must be merged into the existing document. Preserve all existing content and add new changes on top.'
+  : 'This data has been consolidated from MULTIPLE sources (emails, chats, meeting transcripts, uploaded documents). The requirements have already been unified and any conflicts have been resolved by the user.'}
+${conflictContext}${modeContext}
 
 Return ONLY a valid JSON object (no markdown, no code fences) with this structure:
 {
@@ -183,7 +202,7 @@ Return ONLY a valid JSON object (no markdown, no code fences) with this structur
 // ════════════════════════════════════════════
 //  Build BRD from unified analysis (no DeepSeek)
 // ════════════════════════════════════════════
-function buildUnifiedBrdFromAnalysis(unifiedReqs, resolutions, projectName) {
+function buildUnifiedBrdFromAnalysis(unifiedReqs, resolutions, projectName, isUpdateMode) {
   const frs = unifiedReqs.functional_requirements || [];
   const nfrs = unifiedReqs.non_functional_requirements || [];
   const actors = unifiedReqs.actors || [
@@ -195,10 +214,18 @@ function buildUnifiedBrdFromAnalysis(unifiedReqs, resolutions, projectName) {
   const medFRs = frs.filter(r => r.priority === 'Medium').map(r => r.description);
   const lowFRs = frs.filter(r => r.priority === 'Low').map(r => r.description);
 
+  const newCount = frs.filter(r => r.status === 'new').length;
+  const modifiedCount = frs.filter(r => r.status === 'modified').length;
+  const existingCount = frs.filter(r => r.status === 'existing').length;
+
+  const execSummary = isUpdateMode
+    ? `This is Version 2.0 of the Business Requirements Document, updated with new data from additional communication sources. The original document has been preserved and enhanced with ${newCount} new requirement(s)${modifiedCount > 0 ? ` and ${modifiedCount} modified requirement(s)` : ''}.\n\nThe project "${projectName || unifiedReqs.project_title}" now encompasses ${frs.length} functional requirements (${existingCount} existing, ${newCount} new) and ${nfrs.length} non-functional requirements. ${Object.keys(resolutions).length > 0 ? `${Object.keys(resolutions).length} conflict(s) between the existing BRD and new sources were resolved by the project stakeholders.` : 'No conflicts were detected between the existing BRD and new data.'}`
+    : `This Business Requirements Document consolidates requirements gathered from multiple communication sources including emails, chat conversations, meeting transcripts, and uploaded documents. The AI-powered analysis pipeline has identified, deduplicated, and unified all requirements into a single coherent document.\n\nThe project "${projectName || unifiedReqs.project_title}" encompasses ${frs.length} functional requirements and ${nfrs.length} non-functional requirements. ${Object.keys(resolutions).length > 0 ? `${Object.keys(resolutions).length} conflict(s) between sources were identified and resolved by the project stakeholders.` : 'No conflicts were detected between the sources.'}`;
+
   return {
-    title: 'Business Requirements Document',
+    title: isUpdateMode ? 'Business Requirements Document (Updated v2.0)' : 'Business Requirements Document',
     project_name: projectName || unifiedReqs.project_title || 'Software Project',
-    executive_summary: `This Business Requirements Document consolidates requirements gathered from multiple communication sources including emails, chat conversations, meeting transcripts, and uploaded documents. The AI-powered analysis pipeline has identified, deduplicated, and unified all requirements into a single coherent document.\n\nThe project "${projectName || unifiedReqs.project_title}" encompasses ${frs.length} functional requirements and ${nfrs.length} non-functional requirements. ${Object.keys(resolutions).length > 0 ? `${Object.keys(resolutions).length} conflict(s) between sources were identified and resolved by the project stakeholders.` : 'No conflicts were detected between the sources.'}`,
+    executive_summary: execSummary,
     project_scope: `The project covers the development of a comprehensive ${(projectName || unifiedReqs.project_title || '').toLowerCase()} with core user-facing features and administrative capabilities. Requirements have been extracted from ${frs.length > 0 ? 'real stakeholder communications' : 'provided inputs'} and prioritized using the MoSCoW framework.`,
     actors,
     functional_requirements: frs.map((fr, i) => ({

@@ -11,14 +11,17 @@ const DEEPSEEK_URL = 'https://api.deepseek.com/v1/chat/completions';
 
 export async function POST(request) {
   try {
-    const { sources } = await request.json();
-    // sources = [{ sourceType: 'gmail'|'telegram'|'transcript'|'upload'|'manual'|'local_file', text: '...', label: '...' }, ...]
+    const { sources, baseDocument } = await request.json();
+    // sources = [{ sourceType: '...', text: '...', label: '...' }, ...]
+    // baseDocument = { text: '...', fileName: '...' } — optional existing BRD to update
 
     if (!sources || sources.length === 0) {
       return NextResponse.json({ error: 'No source data provided' }, { status: 400 });
     }
 
-    // Combine all text for analysis
+    const isUpdateMode = !!baseDocument?.text;
+
+    // Combine all NEW source text for analysis
     const combinedText = sources.map((s, i) =>
       `=== SOURCE ${i + 1}: ${s.sourceType.toUpperCase()} (${s.label || 'Untitled'}) ===\n${s.text}`
     ).join('\n\n');
@@ -35,23 +38,26 @@ export async function POST(request) {
 
     if (hasKey) {
       try {
-        analysis = await deepSeekAnalysis(combinedText, sources, nlpData);
+        analysis = await deepSeekAnalysis(combinedText, sources, nlpData, baseDocument);
       } catch (err) {
         console.warn('DeepSeek analysis failed, using NLP fallback:', err.message);
-        analysis = nlpFallbackAnalysis(sources, nlpData);
+        analysis = nlpFallbackAnalysis(sources, nlpData, baseDocument);
       }
     } else {
-      analysis = nlpFallbackAnalysis(sources, nlpData);
+      analysis = nlpFallbackAnalysis(sources, nlpData, baseDocument);
     }
 
     return NextResponse.json({
       success: true,
       analysis,
+      isUpdateMode,
       meta: {
         totalSources: sources.length,
         sourceTypes,
         totalCharacters: totalChars,
         analysisMode: hasKey ? 'deepseek' : 'nlp_fallback',
+        hasBaseDocument: isUpdateMode,
+        baseDocumentName: baseDocument?.fileName || null,
       },
     });
 
@@ -105,10 +111,84 @@ function quickNlpAnalysis(text) {
 // ════════════════════════════════════════════
 //  DEEPSEEK UNIFIED ANALYSIS
 // ════════════════════════════════════════════
-async function deepSeekAnalysis(combinedText, sources, nlpData) {
+async function deepSeekAnalysis(combinedText, sources, nlpData, baseDocument) {
   const sourceList = sources.map(s => `- ${s.sourceType}: "${s.label || 'Untitled'}"`).join('\n');
+  const isUpdateMode = !!baseDocument?.text;
 
-  const systemPrompt = `You are an expert Business Analyst specializing in requirements consolidation.
+  let systemPrompt;
+
+  if (isUpdateMode) {
+    // ── UPDATE MODE: Compare new data against existing BRD ──
+    systemPrompt = `You are an expert Business Analyst specializing in BRD maintenance and incremental updates.
+
+You have been given an EXISTING Business Requirements Document (base document) and NEW data from communication sources. Your job is to:
+
+1. COMPARE the new source data against the existing BRD
+2. IDENTIFY what is NEW (additions) that should be added to the BRD
+3. IDENTIFY what has CHANGED (modifications) that should update existing requirements
+4. DETECT any CONFLICTS between the new data and the existing BRD content
+5. Preserve all existing content that is NOT contradicted by new data
+
+EXISTING BRD (base document from "${baseDocument.fileName}"):
+${baseDocument.text.slice(0, 4000)}
+
+NEW data sources:
+${sourceList}
+
+NLP Pre-Analysis of new data:
+- Domain: ${nlpData.detectedDomain}
+- Top Keywords: ${nlpData.keywords.slice(0, 15).join(', ')}
+
+Return ONLY a valid JSON object (no markdown, no code fences) with this structure:
+{
+  "identified_project": {
+    "name": "Project Name (from existing BRD or refined)",
+    "description": "Brief description",
+    "confidence": 0.9
+  },
+  "source_summaries": [
+    { "sourceType": "...", "label": "...", "summary": "What NEW information this source adds", "relevance": "high/medium/low" }
+  ],
+  "update_summary": {
+    "additions_count": 3,
+    "modifications_count": 2,
+    "description": "Summary of what changed"
+  },
+  "conflicts": [
+    {
+      "id": "conflict-1",
+      "topic": "Feature Name",
+      "description": "New data contradicts existing BRD",
+      "options": [
+        { "source": "existing_brd", "description": "Current BRD says...", "context": "..." },
+        { "source": "gmail", "description": "New email says...", "context": "..." }
+      ]
+    }
+  ],
+  "unified_requirements": {
+    "project_title": "...",
+    "actors": [{"name": "...", "description": "..."}],
+    "functional_requirements": [
+      {"id": "FR-001", "description": "...", "priority": "High/Medium/Low", "category": "...", "status": "existing|new|modified", "agreedBySources": ["existing_brd","gmail"]}
+    ],
+    "non_functional_requirements": [
+      {"id": "NFR-001", "description": "...", "priority": "High/Medium/Low", "status": "existing|new|modified"}
+    ],
+    "features": ["feature1", "feature2"],
+    "moscow": {
+      "must_have": ["..."],
+      "should_have": ["..."],
+      "could_have": ["..."],
+      "wont_have": ["..."]
+    },
+    "ambiguities": ["Any unclear items"]
+  }
+}
+
+CRITICAL: Mark each requirement with "status": "existing" (unchanged from base), "new" (added from new sources), or "modified" (changed based on new data). Preserve ALL existing requirements that are not contradicted.`;
+  } else {
+    // ── FRESH MODE: Standard analysis ──
+    systemPrompt = `You are an expert Business Analyst specializing in requirements consolidation.
 
 You are analyzing data collected from MULTIPLE communication sources (emails, chats, meeting transcripts, documents, etc.) for a software project.
 
@@ -168,6 +248,11 @@ Return ONLY a valid JSON object (no markdown, no code fences) with this exact st
 
 IMPORTANT: If there are NO conflicts, return an empty "conflicts" array [].
 If only one source is provided, there can be no conflicts.`;
+  }
+
+  const userMsg = isUpdateMode
+    ? `Compare these ${sources.length} NEW source(s) against the existing BRD and identify additions, modifications, and conflicts:\n\n${combinedText.slice(0, 6000)}`
+    : `Analyze these ${sources.length} source(s) and identify the project, conflicts, and unified requirements:\n\n${combinedText.slice(0, 8000)}`;
 
   const response = await fetch(DEEPSEEK_URL, {
     method: 'POST',
@@ -179,7 +264,7 @@ If only one source is provided, there can be no conflicts.`;
       model: 'deepseek-chat',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Analyze these ${sources.length} source(s) and identify the project, conflicts, and unified requirements:\n\n${combinedText.slice(0, 8000)}` },
+        { role: 'user', content: userMsg },
       ],
       temperature: 0.3,
       max_tokens: 6000,
@@ -193,7 +278,6 @@ If only one source is provided, there can be no conflicts.`;
   const data = await response.json();
   const content = data.choices?.[0]?.message?.content || '';
 
-  // Parse JSON
   let jsonStr = content;
   const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (jsonMatch) jsonStr = jsonMatch[1];
@@ -211,31 +295,51 @@ If only one source is provided, there can be no conflicts.`;
 // ════════════════════════════════════════════
 //  NLP FALLBACK ANALYSIS (no DeepSeek)
 // ════════════════════════════════════════════
-function nlpFallbackAnalysis(sources, nlpData) {
+function nlpFallbackAnalysis(sources, nlpData, baseDocument) {
+  const isUpdateMode = !!baseDocument?.text;
+
   const sourceSummaries = sources.map(s => ({
     sourceType: s.sourceType,
     label: s.label || 'Untitled',
-    summary: `Contains ${s.text.split(/\s+/).length} words of content from ${s.sourceType}`,
+    summary: isUpdateMode
+      ? `Contains ${s.text.split(/\s+/).length} words of NEW data from ${s.sourceType}`
+      : `Contains ${s.text.split(/\s+/).length} words of content from ${s.sourceType}`,
     relevance: 'medium',
   }));
 
-  // Simple conflict detection: look for contradictory keywords per source
+  // Simple conflict detection
   const conflicts = [];
-  if (sources.length > 1) {
-    const paymentKeywords = {
-      razorpay: [], stripe: [], paypal: [], upi: [],
-    };
-    const authKeywords = {
-      oauth: [], 'email-password': [], otp: [], sso: [],
-    };
+  const allSourceTexts = sources.map(s => s.text.toLowerCase()).join(' ');
 
+  if (isUpdateMode) {
+    // Check for contradictions between base doc and new sources
+    const baseLower = baseDocument.text.toLowerCase();
+    const paymentConflicts = [];
+    if (baseLower.includes('razorpay') && allSourceTexts.includes('stripe')) {
+      paymentConflicts.push({ base: 'Razorpay', newSource: 'Stripe' });
+    }
+    if (baseLower.includes('stripe') && allSourceTexts.includes('razorpay')) {
+      paymentConflicts.push({ base: 'Stripe', newSource: 'Razorpay' });
+    }
+    paymentConflicts.forEach(pc => {
+      conflicts.push({
+        id: `conflict-payment-${pc.base.toLowerCase()}`,
+        topic: 'Payment Gateway',
+        description: `New data suggests ${pc.newSource} but existing BRD uses ${pc.base}`,
+        options: [
+          { source: 'existing_brd', description: `Keep ${pc.base} (from existing BRD)`, context: `Current BRD mentions ${pc.base}` },
+          { source: sources[0]?.sourceType || 'new_data', description: `Switch to ${pc.newSource} (from new data)`, context: `New source mentions ${pc.newSource}` },
+        ],
+      });
+    });
+  } else if (sources.length > 1) {
+    const paymentKeywords = { razorpay: [], stripe: [], paypal: [], upi: [] };
     sources.forEach(s => {
       const lower = s.text.toLowerCase();
       if (lower.includes('razorpay')) paymentKeywords.razorpay.push(s.sourceType);
       if (lower.includes('stripe')) paymentKeywords.stripe.push(s.sourceType);
       if (lower.includes('paypal')) paymentKeywords.paypal.push(s.sourceType);
     });
-
     const usedPayments = Object.entries(paymentKeywords).filter(([, srcs]) => srcs.length > 0);
     if (usedPayments.length > 1) {
       conflicts.push({
@@ -251,25 +355,45 @@ function nlpFallbackAnalysis(sources, nlpData) {
     }
   }
 
-  // Build simple unified requirements from NLP
+  // Build requirements from NLP
   const requirementPatterns = ['should', 'must', 'shall', 'need', 'require', 'support', 'allow', 'enable', 'provide'];
   const allText = sources.map(s => s.text).join(' ');
   const sentences = allText.replace(/\n+/g, '. ').split(/(?<=[.!?])\s+/).filter(s => s.length > 10);
   const reqSentences = sentences.filter(s => requirementPatterns.some(p => s.toLowerCase().includes(p)));
 
-  const frs = reqSentences.slice(0, 8).map((s, i) => ({
-    id: `FR-${String(i + 1).padStart(3, '0')}`,
+  // In update mode, extract existing requirements from base doc too
+  let existingFRs = [];
+  if (isUpdateMode) {
+    const baseSentences = baseDocument.text.replace(/\n+/g, '. ').split(/(?<=[.!?])\s+/).filter(s => s.length > 10);
+    const baseReqSentences = baseSentences.filter(s => requirementPatterns.some(p => s.toLowerCase().includes(p)));
+    existingFRs = baseReqSentences.slice(0, 6).map((s, i) => ({
+      id: `FR-${String(i + 1).padStart(3, '0')}`,
+      description: s.trim(),
+      priority: i < 2 ? 'High' : i < 4 ? 'Medium' : 'Low',
+      category: 'Core',
+      status: 'existing',
+      agreedBySources: ['existing_brd'],
+    }));
+  }
+
+  const newFRs = reqSentences.slice(0, 8).map((s, i) => ({
+    id: `FR-${String(existingFRs.length + i + 1).padStart(3, '0')}`,
     description: s.trim(),
     priority: i < 3 ? 'High' : i < 5 ? 'Medium' : 'Low',
     category: 'Core',
+    status: isUpdateMode ? 'new' : undefined,
     agreedBySources: sources.map(src => src.sourceType),
   }));
 
-  return {
+  const allFRs = [...existingFRs, ...newFRs];
+
+  const result = {
     identified_project: {
       name: `${nlpData.detectedDomain} Project`,
-      description: `A ${nlpData.detectedDomain.toLowerCase()} system based on analysis of ${sources.length} source(s)`,
-      confidence: 0.65,
+      description: isUpdateMode
+        ? `Updated ${nlpData.detectedDomain.toLowerCase()} system — base document enhanced with ${sources.length} new source(s)`
+        : `A ${nlpData.detectedDomain.toLowerCase()} system based on analysis of ${sources.length} source(s)`,
+      confidence: isUpdateMode ? 0.8 : 0.65,
     },
     source_summaries: sourceSummaries,
     conflicts,
@@ -279,20 +403,31 @@ function nlpFallbackAnalysis(sources, nlpData) {
         { name: 'User', description: 'Primary end user of the system' },
         { name: 'Admin', description: 'System administrator' },
       ],
-      functional_requirements: frs,
+      functional_requirements: allFRs,
       non_functional_requirements: [
-        { id: 'NFR-001', description: 'System shall respond within 2 seconds', priority: 'High' },
-        { id: 'NFR-002', description: 'System shall support 1000+ concurrent users', priority: 'Medium' },
-        { id: 'NFR-003', description: 'All data encrypted in transit and at rest', priority: 'High' },
+        { id: 'NFR-001', description: 'System shall respond within 2 seconds', priority: 'High', status: isUpdateMode ? 'existing' : undefined },
+        { id: 'NFR-002', description: 'System shall support 1000+ concurrent users', priority: 'Medium', status: isUpdateMode ? 'existing' : undefined },
+        { id: 'NFR-003', description: 'All data encrypted in transit and at rest', priority: 'High', status: isUpdateMode ? 'existing' : undefined },
       ],
       features: nlpData.keywords.slice(0, 6),
       moscow: {
-        must_have: frs.filter(r => r.priority === 'High').map(r => r.description).slice(0, 4),
-        should_have: frs.filter(r => r.priority === 'Medium').map(r => r.description).slice(0, 3),
-        could_have: frs.filter(r => r.priority === 'Low').map(r => r.description).slice(0, 3),
+        must_have: allFRs.filter(r => r.priority === 'High').map(r => r.description).slice(0, 4),
+        should_have: allFRs.filter(r => r.priority === 'Medium').map(r => r.description).slice(0, 3),
+        could_have: allFRs.filter(r => r.priority === 'Low').map(r => r.description).slice(0, 3),
         wont_have: ['Mobile native app (v2)', 'Offline mode', 'Third-party integrations (v2)'],
       },
-      ambiguities: sources.length === 1 ? ['Only one source provided — more data may improve accuracy'] : [],
+      ambiguities: sources.length === 1 ? ['Only one new source provided — more data may improve accuracy'] : [],
     },
   };
+
+  if (isUpdateMode) {
+    result.update_summary = {
+      additions_count: newFRs.length,
+      modifications_count: 0,
+      description: `${newFRs.length} new requirement(s) identified from ${sources.length} source(s). ${existingFRs.length} existing requirement(s) preserved.`,
+    };
+  }
+
+  return result;
 }
+
