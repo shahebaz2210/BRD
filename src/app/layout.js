@@ -2,7 +2,7 @@ import './globals.css';
 
 export const metadata = {
   title: 'BRD Generator — AI-Driven Requirements Extraction',
-  description: 'AI-powered Business Requirements Document generator using DeepSeek V3.2 for intelligent NLP parsing and requirement classification.',
+  description: 'AI-powered Business Requirements Document generator using Mistral (local) for data filtering and DeepSeek for BRD generation.',
 };
 
 export default function RootLayout({ children }) {

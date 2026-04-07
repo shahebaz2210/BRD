@@ -3,28 +3,8 @@
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import Navbar from '@/components/Navbar';
 
-/* ── NAVBAR ── */
-function Navbar() {
-  const pathname = usePathname();
-  return (
-    <nav className="navbar" id="main-navbar">
-      <div className="navbar-brand">
-        <div className="navbar-logo">B</div>
-        <div>
-          <div className="navbar-title">BRD Generator</div>
-          <div className="navbar-subtitle">AI-Driven — DeepSeek V3.2</div>
-        </div>
-      </div>
-      <div className="navbar-links">
-        <Link href="/" className={`navbar-link ${pathname === '/' ? 'active' : ''}`}>Dashboard</Link>
-        <Link href="/add-input" className={`navbar-link ${pathname === '/add-input' ? 'active' : ''}`}>Add Input</Link>
-        <Link href="/brd-view" className={`navbar-link ${pathname === '/brd-view' ? 'active' : ''}`}>BRD View</Link>
-      </div>
-      <div className="navbar-status"><span className="status-dot"></span>Pipeline active</div>
-    </nav>
-  );
-}
 
 /* ── ANIMATED COUNTER ── */
 function AnimatedCounter({ target, suffix = '' }) {
@@ -126,11 +106,11 @@ export default function DashboardPage() {
   ];
 
   const pipelineStages = [
-    { icon: '📥', title: 'Data Ingestion', sub: 'Telegram · Email · Meet', color: 'green' },
-    { icon: '🧹', title: 'NLP Cleaning', sub: 'Tokenization · Regex', color: 'orange' },
-    { icon: '🤖', title: 'LLM Processing', sub: 'DeepSeek V3.2', color: 'purple' },
-    { icon: '🗄️', title: 'DB Storage', sub: 'MongoDB', color: 'blue' },
-    { icon: '📄', title: 'BRD Output', sub: 'View · DOCX', color: 'red' },
+    { icon: '📥', title: 'Data Aggregation', sub: 'Telegram · Gmail · Meet', color: 'green' },
+    { icon: '🧠', title: 'Mistral Filter', sub: 'Local LLM · Ollama', color: 'orange' },
+    { icon: '🃏', title: 'Card Generation', sub: 'Structured Extraction', color: 'purple' },
+    { icon: '🤖', title: 'DeepSeek BRD', sub: 'BRD from Cards Only', color: 'blue' },
+    { icon: '📄', title: 'BRD Output', sub: 'JSON · View · DOCX', color: 'red' },
   ];
 
   return (
@@ -143,10 +123,10 @@ export default function DashboardPage() {
           <div className="hero-badge">🚀 AI-Powered Requirements Engineering</div>
           <h1 className="hero-title">AI BRD Generator</h1>
           <p className="hero-description">
-            Extract structured requirements from unstructured conversations using DeepSeek V3.2 NLP pipeline
+            Dual-LLM pipeline: Mistral (local) filters &amp; extracts cards → DeepSeek generates BRD. Raw data never leaves your machine.
           </p>
           <div className="hero-actions">
-            <Link href="/add-input"><button className="btn-hero-primary">📥 Add New Input</button></Link>
+            <Link href="/add-input"><button className="btn-hero-primary">🤖 Auto-Generate BRD</button></Link>
             <Link href="/brd-view"><button className="btn-hero-secondary">📄 View BRDs</button></Link>
           </div>
           {currentTime && <div className="hero-time">🕐 {currentTime}</div>}
@@ -198,8 +178,8 @@ export default function DashboardPage() {
             <div className="empty-state">
               <div className="empty-state-icon">📭</div>
               <h3>No messages yet</h3>
-              <p>Go to &quot;Add Input&quot; to paste Telegram chats, emails, or meeting notes and start extracting requirements.</p>
-              <Link href="/add-input"><button className="btn-primary" style={{ width: 'auto', marginTop: 16 }}>📥 Add Your First Input</button></Link>
+              <p>Click &quot;Auto-Generate BRD&quot; — the AI will automatically fetch all Telegram, Gmail, and meeting data, then generate a complete BRD.</p>
+              <Link href="/add-input"><button className="btn-primary" style={{ width: 'auto', marginTop: 16 }}>🤖 Auto-Generate Your First BRD</button></Link>
             </div>
           ) : (
             <div className="messages-grid">

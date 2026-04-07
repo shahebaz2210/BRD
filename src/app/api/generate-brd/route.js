@@ -357,9 +357,9 @@ function generateSmartBrd(data) {
   const lowFRs = functionalReqs.filter(r => r.priority === 'Low').map(r => r.description);
 
   return {
-    title: 'Business Requirements Document',
-    project_name: 'AI-Driven Service Platform',
-    executive_summary: 'This BRD outlines requirements for an AI-Driven Service Platform extracted from stakeholder communications using NLP and AI pipelines.',
+    title: 'Demo Business Requirements Document',
+    project_name: 'Demo Project (Fallback)',
+    executive_summary: 'Because connecting to the database and DeepSeek failed, this is a fallback DEMO BRD. To get your actual project BRD, run the Auto-Generate pipeline as it bypasses the DB if needed.',
     project_scope: 'Full-stack web application with responsive frontend, API backend, MongoDB, and third-party integrations.',
     actors,
     functional_requirements: functionalReqs,
