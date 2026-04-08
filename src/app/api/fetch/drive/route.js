@@ -1,7 +1,65 @@
 import { NextResponse } from 'next/server';
 
+// ── Helper: Refresh the Google access token using the refresh token ──
+async function refreshGoogleToken(refreshToken) {
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: process.env.GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
+    });
+    const data = await res.json();
+    if (res.ok && data.access_token) return data.access_token;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Helper: Get a valid token (refresh if needed) ──
+async function getValidToken(request) {
+  let token = request.cookies.get('google_access_token')?.value;
+  const refreshToken = request.cookies.get('google_refresh_token')?.value;
+  let refreshed = false;
+
+  if (!token && !refreshToken) return { token: null, refreshed: false };
+
+  if (token) {
+    const checkRes = await fetch(
+      `https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${token}`,
+      { cache: 'no-store' }
+    );
+    if (!checkRes.ok && refreshToken) {
+      const newToken = await refreshGoogleToken(refreshToken);
+      if (newToken) {
+        token = newToken;
+        refreshed = true;
+      } else {
+        return { token: null, refreshed: false };
+      }
+    } else if (!checkRes.ok) {
+      return { token: null, refreshed: false };
+    }
+  } else if (refreshToken) {
+    const newToken = await refreshGoogleToken(refreshToken);
+    if (newToken) {
+      token = newToken;
+      refreshed = true;
+    } else {
+      return { token: null, refreshed: false };
+    }
+  }
+
+  return { token, refreshed };
+}
+
 export async function GET(request) {
-  const token = request.cookies.get('google_access_token')?.value;
+  const { token, refreshed } = await getValidToken(request);
 
   if (!token) {
     return NextResponse.json(
@@ -32,7 +90,16 @@ export async function GET(request) {
       owner: f.owners?.[0]?.displayName || 'Unknown',
     }));
 
-    return NextResponse.json({ success: true, files });
+    const response = NextResponse.json({ success: true, files });
+    if (refreshed) {
+      response.cookies.set('google_access_token', token, {
+        httpOnly: true,
+        maxAge: 3600,
+        path: '/',
+        sameSite: 'lax',
+      });
+    }
+    return response;
   } catch (err) {
     console.error('Drive fetch error:', err);
     return NextResponse.json({ error: err.message }, { status: 500 });
@@ -41,7 +108,7 @@ export async function GET(request) {
 
 // Fetch the content of a specific Google Doc
 export async function POST(request) {
-  const token = request.cookies.get('google_access_token')?.value;
+  const { token } = await getValidToken(request);
 
   if (!token) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });

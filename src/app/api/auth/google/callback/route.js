@@ -11,6 +11,7 @@ export async function GET(request) {
   const redirectUri = `${baseUrl}/api/auth/google/callback`;
 
   if (error || !code) {
+    console.error('[Google OAuth] Auth error or no code:', error);
     return NextResponse.redirect(`${baseUrl}/add-input?error=auth_failed`);
   }
 
@@ -19,7 +20,8 @@ export async function GET(request) {
 
   try {
     // Exchange authorization code for tokens
-    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    // Try with the current host's redirect URI first
+    let tokenRes = await fetch('https://oauth2.googleapis.com/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -31,11 +33,38 @@ export async function GET(request) {
       }),
     });
 
-    const tokenData = await tokenRes.json();
+    let tokenData = await tokenRes.json();
+
+    // If redirect_uri mismatch (port changed), try common localhost ports
+    if (!tokenRes.ok && tokenData.error === 'redirect_uri_mismatch') {
+      console.warn('[Google OAuth] redirect_uri mismatch, trying alternate ports...');
+      const ports = ['3000', '3001', '3002'];
+      for (const port of ports) {
+        const altRedirectUri = `http://localhost:${port}/api/auth/google/callback`;
+        if (altRedirectUri === redirectUri) continue; // skip current
+        
+        tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            code,
+            client_id: clientId,
+            client_secret: clientSecret,
+            redirect_uri: altRedirectUri,
+            grant_type: 'authorization_code',
+          }),
+        });
+        tokenData = await tokenRes.json();
+        if (tokenRes.ok && tokenData.access_token) {
+          console.log(`[Google OAuth] ✅ Token exchange succeeded with port ${port}`);
+          break;
+        }
+      }
+    }
 
     if (!tokenRes.ok || !tokenData.access_token) {
-      console.error('Token exchange failed:', tokenData);
-      throw new Error('Token exchange failed');
+      console.error('[Google OAuth] Token exchange failed:', tokenData);
+      throw new Error(`Token exchange failed: ${tokenData.error || 'unknown'}`);
     }
 
     // Get user email
@@ -68,9 +97,10 @@ export async function GET(request) {
       });
     }
 
+    console.log(`[Google OAuth] ✅ Authentication successful for ${userInfo.email}`);
     return response;
   } catch (err) {
-    console.error('OAuth callback error:', err);
+    console.error('[Google OAuth] Callback error:', err);
     return NextResponse.redirect(`${baseUrl}/add-input?error=token_failed`);
   }
 }

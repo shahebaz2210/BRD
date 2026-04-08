@@ -1,13 +1,73 @@
 import { NextResponse } from 'next/server';
 
-export async function GET(request) {
-  const token = request.cookies.get('google_access_token')?.value;
+// ── Helper: Refresh the Google access token using the refresh token ──
+async function refreshGoogleToken(refreshToken) {
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: process.env.GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
+    });
+    const data = await res.json();
+    if (res.ok && data.access_token) return data.access_token;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
-  if (!token) {
+export async function GET(request) {
+  let token = request.cookies.get('google_access_token')?.value;
+  const refreshToken = request.cookies.get('google_refresh_token')?.value;
+
+  if (!token && !refreshToken) {
     return NextResponse.json(
       { error: 'Not authenticated. Please connect your Google account first.' },
       { status: 401 }
     );
+  }
+
+  // Check if token is still valid, refresh if needed
+  let tokenRefreshed = false;
+  if (token) {
+    const checkRes = await fetch(
+      `https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${token}`,
+      { cache: 'no-store' }
+    );
+    if (!checkRes.ok && refreshToken) {
+      console.log('[Gmail] Token expired, refreshing...');
+      const newToken = await refreshGoogleToken(refreshToken);
+      if (newToken) {
+        token = newToken;
+        tokenRefreshed = true;
+      } else {
+        return NextResponse.json(
+          { error: 'Google token expired. Please sign in with Google again.' },
+          { status: 401 }
+        );
+      }
+    } else if (!checkRes.ok) {
+      return NextResponse.json(
+        { error: 'Google token expired. Please sign in with Google again.' },
+        { status: 401 }
+      );
+    }
+  } else if (refreshToken) {
+    const newToken = await refreshGoogleToken(refreshToken);
+    if (newToken) {
+      token = newToken;
+      tokenRefreshed = true;
+    } else {
+      return NextResponse.json(
+        { error: 'Could not refresh Google token. Please sign in again.' },
+        { status: 401 }
+      );
+    }
   }
 
   try {
@@ -69,10 +129,24 @@ export async function GET(request) {
       })
     );
 
-    return NextResponse.json({
+    const responseData = {
       success: true,
       messages: messages.filter(Boolean),
-    });
+    };
+
+    const response = NextResponse.json(responseData);
+
+    // Update cookie if token was refreshed
+    if (tokenRefreshed && token) {
+      response.cookies.set('google_access_token', token, {
+        httpOnly: true,
+        maxAge: 3600,
+        path: '/',
+        sameSite: 'lax',
+      });
+    }
+
+    return response;
   } catch (err) {
     console.error('Gmail fetch error:', err);
     return NextResponse.json({ error: err.message }, { status: 500 });

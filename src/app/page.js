@@ -107,9 +107,9 @@ export default function DashboardPage() {
 
   const pipelineStages = [
     { icon: '📥', title: 'Data Aggregation', sub: 'Telegram · Gmail · Meet', color: 'green' },
-    { icon: '🧠', title: 'Mistral Filter', sub: 'Local LLM · Ollama', color: 'orange' },
-    { icon: '🃏', title: 'Card Generation', sub: 'Structured Extraction', color: 'purple' },
-    { icon: '🤖', title: 'DeepSeek BRD', sub: 'BRD from Cards Only', color: 'blue' },
+    { icon: '🤖', title: 'GPT-OSS-120B', sub: 'Filtering · Extraction', color: 'orange' },
+    { icon: '🃏', title: 'Structured Cards', sub: 'Requirements · Decisions', color: 'purple' },
+    { icon: '🧠', title: 'DeepSeek', sub: 'Reasoning · BRD Gen', color: 'blue' },
     { icon: '📄', title: 'BRD Output', sub: 'JSON · View · DOCX', color: 'red' },
   ];
 
@@ -123,7 +123,7 @@ export default function DashboardPage() {
           <div className="hero-badge">🚀 AI-Powered Requirements Engineering</div>
           <h1 className="hero-title">AI BRD Generator</h1>
           <p className="hero-description">
-            Dual-LLM pipeline: Mistral (local) filters &amp; extracts cards → DeepSeek generates BRD. Raw data never leaves your machine.
+            Dual-model pipeline: GPT-OSS-120B filters &amp; extracts cards → DeepSeek reasons &amp; generates BRD.
           </p>
           <div className="hero-actions">
             <Link href="/add-input"><button className="btn-hero-primary">🤖 Auto-Generate BRD</button></Link>

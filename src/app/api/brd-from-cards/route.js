@@ -1,5 +1,10 @@
+// ════════════════════════════════════════════════════════════════
+//  BRD FROM CARDS — POST /api/brd-from-cards
+//  Stage 2: DeepSeek generates BRD from curated cards
+// ════════════════════════════════════════════════════════════════
+
 import { NextResponse } from 'next/server';
-import { generateBRD } from '@/lib/llmDeepseek';
+import { generateBRD } from '@/lib/llmUnified';
 
 export async function POST(request) {
   try {
@@ -11,18 +16,18 @@ export async function POST(request) {
     }
 
     const startTime = Date.now();
-    console.log(`\n[brd-from-cards] ═══ Phase 2: BRD Generation started for "${project}" ═══`);
+    console.log(`\n[brd-from-cards] ═══ DeepSeek BRD generation for "${project}" ═══`);
 
     let brd;
     try {
       brd = await generateBRD(cards, project, description || '');
     } catch (err) {
-      console.error('[brd-from-cards] BRD generation failed:', err.message);
+      console.error('[brd-from-cards] DeepSeek BRD generation failed:', err.message);
       brd = { error: 'BRD generation failed', message: err.message };
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[brd-from-cards] ═══ BRD Generation complete in ${elapsed}s ═══\n`);
+    console.log(`[brd-from-cards] ═══ BRD complete in ${elapsed}s ═══\n`);
 
     return NextResponse.json({
       success: true,

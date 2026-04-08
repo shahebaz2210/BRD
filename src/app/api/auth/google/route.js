@@ -11,6 +11,8 @@ export async function GET(request) {
   const protocol = host.includes('localhost') ? 'http' : 'https';
   const redirectUri = `${protocol}://${host}/api/auth/google/callback`;
 
+  console.log(`[Google OAuth] Starting auth flow, redirect_uri: ${redirectUri}`);
+
   const scopes = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/drive.readonly',

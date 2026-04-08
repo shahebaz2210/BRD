@@ -78,7 +78,7 @@ export default function AutoGeneratePage() {
 
     const stages = [
       { icon: '📥', title: 'Data Aggregation', subtitle: 'Fetching ALL data from Telegram, Gmail, Drive...', status: 'pending', detail: '', elapsed: '' },
-      { icon: '🧠', title: 'Mistral — Relevance Filter & Cards', subtitle: 'Local LLM filtering noise & structuring requirements...', status: 'pending', detail: '', elapsed: '' }
+      { icon: '🤖', title: 'GPT-OSS-120B — Extract Cards', subtitle: 'AI filtering noise & structuring requirements...', status: 'pending', detail: '', elapsed: '' }
     ];
     setPipelineStages(stages);
 
@@ -105,13 +105,47 @@ export default function AutoGeneratePage() {
       const aggData = await aggRes.json();
 
       if (!aggRes.ok || !aggData.success) {
+        const aggDiag = aggData.diagnostics || {};
         addLog('⚠️ No live data sources available — using project description as seed data', 'warn');
+        if (aggDiag.gmail === 'no google token') {
+          addLog('   📧 Gmail: Not connected — click "Sign in with Google" in the navbar', 'warn');
+        }
+        if (aggDiag.drive === 'no google token') {
+          addLog('   📞 Drive: Not connected — click "Sign in with Google" in the navbar', 'warn');
+        }
+        if (aggDiag.gmail === 'token expired — re-sign in with Google') {
+          addLog('   📧 Gmail: Token expired — click "Sign in with Google" to reconnect', 'warn');
+        }
+        if (aggDiag.telegram) {
+          addLog(`   ✈️ Telegram: ${aggDiag.telegram}`, 'warn');
+        }
         rawData = `[PROJECT]\nProject: ${projectName}\nDescription: ${description || 'No description provided'}\n\nThe system should generate requirements based on the project name and description provided.`;
       } else {
         rawData = aggData.data;
         meta = aggData.meta;
         addLog(`✅ Aggregated ${rawData.length.toLocaleString()} chars from ${meta.totalSources} source(s)`, 'success');
         if (meta.telegram > 0) addLog(`   ✈️ Telegram: ${meta.telegram} messages`, 'info');
+        if (meta.gmail > 0) addLog(`   📧 Gmail: ${meta.gmail} emails`, 'info');
+        if (meta.meeting > 0) addLog(`   📞 Drive: ${meta.meeting} document(s)`, 'info');
+        // Show diagnostics for skipped sources
+        const diag = aggData.diagnostics || {};
+        if (meta.gmail === 0 && diag.gmail) {
+          if (diag.gmail === 'no google token') {
+            addLog('   📧 Gmail: Skipped — Sign in with Google first (button in navbar)', 'warn');
+          } else {
+            addLog(`   📧 Gmail: ${diag.gmail}`, 'warn');
+          }
+        }
+        if (meta.meeting === 0 && diag.drive) {
+          if (diag.drive === 'no google token') {
+            addLog('   📞 Drive: Skipped — Sign in with Google first (button in navbar)', 'warn');
+          } else {
+            addLog(`   📞 Drive: ${diag.drive}`, 'warn');
+          }
+        }
+        if (meta.telegram === 0 && diag.telegram) {
+          addLog(`   ✈️ Telegram: ${diag.telegram}`, 'warn');
+        }
       }
 
       updateStage(0, {
@@ -122,7 +156,7 @@ export default function AutoGeneratePage() {
 
       // ── STAGE 1: FILTERING & CARDS (Mistral) ──
       updateStage(1, { status: 'active' });
-      addLog('🧠 Sending data to Mistral (Ollama) to filter and extract requirement cards...', 'info');
+      addLog('🤖 Sending data to GPT-OSS-120B to extract requirement cards...', 'info');
       
       stageStart = Date.now();
       const processRes = await fetch('/api/generate-cards', {
@@ -137,7 +171,7 @@ export default function AutoGeneratePage() {
       const processData = await processRes.json();
       
       if (!processRes.ok || !processData.success) {
-        throw new Error(processData.error || 'Mistral extraction failed');
+        throw new Error(processData.error || 'GPT-OSS card extraction failed');
       }
 
       const cards = processData.cards || [];
@@ -177,7 +211,7 @@ export default function AutoGeneratePage() {
     const startTime = Date.now();
 
     const stages = [
-      { icon: '🤖', title: 'DeepSeek — BRD Generation', subtitle: 'Generating Business Requirements Document from curated cards...', status: 'active', detail: '', elapsed: '' },
+      { icon: '🧠', title: 'DeepSeek — BRD Generation', subtitle: 'Reasoning layer generating Business Requirements Document...', status: 'active', detail: '', elapsed: '' },
       { icon: '💾', title: 'Save & Finalize', subtitle: 'Saving BRD to database...', status: 'pending', detail: '', elapsed: '' },
     ];
     setPipelineStages(stages);
@@ -301,7 +335,7 @@ export default function AutoGeneratePage() {
           <h1>🤖 AI Auto-Generate BRD</h1>
           <p className="page-subtitle">
             Fully automated — Enter project details, AI handles everything.
-            Mistral filters &amp; extracts → DeepSeek generates BRD.
+            GPT-OSS-120B extracts cards → DeepSeek generates BRD.
           </p>
         </div>
 
@@ -401,9 +435,9 @@ export default function AutoGeneratePage() {
             }}>
               <strong style={{ color: 'var(--green)' }}>How it works:</strong><br />
               1️⃣ Fetches <strong>ALL</strong> Telegram messages, Gmail emails, Drive transcripts<br />
-              2️⃣ Mistral (local LLM) identifies what's relevant to <em>your project</em><br />
-              3️⃣ Mistral extracts structured requirement cards<br />
-              4️⃣ DeepSeek generates a complete BRD from the cards<br />
+              2️⃣ GPT-OSS-120B identifies relevant data for <em>your project</em><br />
+              3️⃣ Extracts structured requirement cards<br />
+              4️⃣ DeepSeek reasons over cards &amp; generates complete BRD<br />
               5️⃣ BRD saved to database — ready to view &amp; download as DOCX
             </div>
 

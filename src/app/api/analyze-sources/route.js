@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
-const DEEPSEEK_URL = 'https://api.deepseek.com/v1/chat/completions';
+const DEEPSEEK_URL = DEEPSEEK_API_KEY && DEEPSEEK_API_KEY.startsWith('sk-or-')
+  ? 'https://openrouter.ai/api/v1/chat/completions'
+  : 'https://api.deepseek.com/v1/chat/completions';
 
 // ════════════════════════════════════════════
 //  UNIFIED MULTI-SOURCE ANALYSIS
@@ -261,7 +263,7 @@ If only one source is provided, there can be no conflicts.`;
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'deepseek-chat',
+      model: DEEPSEEK_API_KEY && DEEPSEEK_API_KEY.startsWith('sk-or-') ? 'deepseek/deepseek-chat' : 'deepseek-chat',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMsg },

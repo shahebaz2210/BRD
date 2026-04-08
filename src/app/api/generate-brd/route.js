@@ -1,23 +1,33 @@
+// ════════════════════════════════════════════════════════════════
+//  GENERATE BRD — POST /api/generate-brd
+//  Uses DeepSeek for BRD generation + saves to MongoDB
+// ════════════════════════════════════════════════════════════════
+
 import { NextResponse } from 'next/server';
 import connectDB from '@/lib/mongodb';
 import Message from '@/models/Message';
 import Brd from '@/models/Brd';
+import { generateBRD, safeParseJSON } from '@/lib/llmUnified';
 
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
-const DEEPSEEK_URL = 'https://api.deepseek.com/v1/chat/completions';
+const DEEPSEEK_URL = DEEPSEEK_API_KEY && DEEPSEEK_API_KEY.startsWith('sk-or-')
+  ? 'https://openrouter.ai/api/v1/chat/completions'
+  : 'https://api.deepseek.com/v1/chat/completions';
+const DEEPSEEK_MODEL = DEEPSEEK_API_KEY && DEEPSEEK_API_KEY.startsWith('sk-or-')
+  ? 'deepseek/deepseek-chat'
+  : 'deepseek-chat';
 
 export async function POST(request) {
   try {
     const body = await request.json();
-    
-    // ═══ NEW: Accept unified analysis data with conflict resolutions ═══
+
     const {
-      unifiedRequirements,     // pre-analyzed unified requirements from analyze-sources
-      conflictResolutions,     // user's choices for each conflict: { conflictId: chosenOptionIndex }
-      sourceTexts,             // combined text from all sources
-      projectName,             // identified project name
-      isUpdateMode,            // true if updating an existing BRD
-      baseDocumentText,        // the original document text (for update mode)
+      unifiedRequirements,
+      conflictResolutions,
+      sourceTexts,
+      projectName,
+      isUpdateMode,
+      baseDocumentText,
     } = body;
 
     let brdContent;
@@ -45,7 +55,8 @@ export async function POST(request) {
     } else {
       // ── Legacy flow: gather from DB ──
       let messages = [];
-      const db = await connectDB();
+      let db = null;
+      try { db = await connectDB(); } catch { /* DB unavailable */ }
       if (db) {
         try {
           messages = await Message.find().sort({ createdAt: -1 }).limit(50).lean();
@@ -78,6 +89,11 @@ export async function POST(request) {
         non_functional_requirements: brdContent.non_functional_requirements || [],
         actors: brdContent.actors || [],
         moscow: brdContent.moscow || { must_have: [], should_have: [], could_have: [], wont_have: [] },
+        stakeholders: brdContent.stakeholders || [],
+        decisions_and_approvals: brdContent.decisions_and_approvals || [],
+        timelines_and_milestones: brdContent.timelines_and_milestones || [],
+        feature_prioritization: brdContent.feature_prioritization || [],
+        risks_or_issues: brdContent.risks_or_issues || [],
         assumptions: brdContent.assumptions || [],
         constraints: brdContent.constraints || [],
         acceptance_criteria: brdContent.acceptance_criteria || [],
@@ -87,12 +103,13 @@ export async function POST(request) {
     };
 
     let savedBrd;
-    const db = await connectDB();
-    if (db) {
+    let db2 = null;
+    try { db2 = await connectDB(); } catch { /* DB unavailable */ }
+    if (db2) {
       try {
         savedBrd = await Brd.create(brdData);
       } catch (dbErr) {
-        console.error('MongoDB BRD save error:', dbErr);
+        console.warn('MongoDB BRD save error:', dbErr.message);
       }
     }
 
@@ -112,10 +129,9 @@ export async function POST(request) {
 }
 
 // ════════════════════════════════════════════
-//  NEW: Generate BRD from unified analysis + conflict resolutions
+//  Generate BRD from unified analysis via DeepSeek
 // ════════════════════════════════════════════
 async function generateUnifiedBrdWithDeepSeek(unifiedReqs, resolutions, sourceTexts, projectName, isUpdateMode, baseDocumentText) {
-  // Apply conflict resolutions to the prompt
   let conflictContext = '';
   if (Object.keys(resolutions).length > 0) {
     conflictContext = `\n\nThe user has resolved the following conflicts:\n`;
@@ -130,26 +146,27 @@ async function generateUnifiedBrdWithDeepSeek(unifiedReqs, resolutions, sourceTe
 1. PRESERVE all existing content from the base document
 2. ADD new requirements identified from the new sources
 3. MODIFY any existing requirements that have been updated by new data
-4. Mark new additions clearly in descriptions (you can prefix with "[NEW]" or "[UPDATED]")
-5. The version should be 2.0, and the executive summary should mention this is an updated version
+4. Mark new additions clearly in descriptions (prefix with "[NEW]" or "[UPDATED]")
+5. The version should be 2.0
 
 EXISTING BRD CONTENT (base document):
 ${baseDocumentText.slice(0, 4000)}`;
   }
 
-  const systemPrompt = `You are a senior Business Analyst. Generate a comprehensive, professional Business Requirements Document (BRD) from the analyzed requirements data.
+  const prompt = `You are a senior Business Analyst. Generate a comprehensive BRD from the analyzed requirements data.
 
-${isUpdateMode 
-  ? 'This is an INCREMENTAL UPDATE to an existing BRD document. New data has been collected from additional sources and must be merged into the existing document. Preserve all existing content and add new changes on top.'
-  : 'This data has been consolidated from MULTIPLE sources (emails, chats, meeting transcripts, uploaded documents). The requirements have already been unified and any conflicts have been resolved by the user.'}
+${isUpdateMode
+  ? 'This is an INCREMENTAL UPDATE to an existing BRD. Preserve existing content and add new changes.'
+  : 'This data has been consolidated from MULTIPLE sources. Requirements have been unified and conflicts resolved.'}
 ${conflictContext}${modeContext}
 
 Return ONLY a valid JSON object (no markdown, no code fences) with this structure:
 {
   "title": "Business Requirements Document",
   "project_name": "${projectName}",
-  "executive_summary": "2-3 paragraph executive summary mentioning data was consolidated from multiple sources",
+  "executive_summary": "2-3 paragraph executive summary",
   "project_scope": "Detailed project scope description",
+  "stakeholders": ["..."],
   "actors": [{"name": "...", "description": "..."}],
   "functional_requirements": [
     {"id": "FR-001", "description": "...", "priority": "High/Medium/Low", "category": "..."}
@@ -157,26 +174,31 @@ Return ONLY a valid JSON object (no markdown, no code fences) with this structur
   "non_functional_requirements": [
     {"id": "NFR-001", "description": "...", "priority": "High/Medium/Low"}
   ],
+  "decisions_and_approvals": ["..."],
+  "timelines_and_milestones": ["..."],
+  "feature_prioritization": [{"feature": "...", "priority": "High/Medium/Low"}],
   "moscow": {
     "must_have": ["..."],
     "should_have": ["..."],
     "could_have": ["..."],
     "wont_have": ["..."]
   },
+  "risks_or_issues": ["..."],
   "assumptions": ["..."],
   "constraints": ["..."],
   "acceptance_criteria": ["..."]
-}`;
+}
+
+Generate a unified BRD from these consolidated requirements:
+
+${JSON.stringify(unifiedReqs, null, 2).slice(0, 6000)}`;
 
   const response = await fetch(DEEPSEEK_URL, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: 'deepseek-chat',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Generate a unified BRD from these consolidated requirements:\n\n${JSON.stringify(unifiedReqs, null, 2).slice(0, 6000)}` },
-      ],
+      model: DEEPSEEK_MODEL,
+      messages: [{ role: 'user', content: prompt }],
       temperature: 0.4,
       max_tokens: 6000,
     }),
@@ -186,21 +208,13 @@ Return ONLY a valid JSON object (no markdown, no code fences) with this structur
 
   const data = await response.json();
   const content = data.choices?.[0]?.message?.content || '';
-  let jsonStr = content;
-  const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (jsonMatch) jsonStr = jsonMatch[1];
-  try {
-    return JSON.parse(jsonStr.trim());
-  } catch {
-    const start = content.indexOf('{');
-    const end = content.lastIndexOf('}');
-    if (start !== -1 && end !== -1) return JSON.parse(content.slice(start, end + 1));
-    throw new Error('Could not parse DeepSeek BRD response');
-  }
+  const parsed = safeParseJSON(content);
+  if (!parsed) throw new Error('Could not parse DeepSeek BRD response');
+  return parsed;
 }
 
 // ════════════════════════════════════════════
-//  Build BRD from unified analysis (no DeepSeek)
+//  Build BRD from unified analysis (no API)
 // ════════════════════════════════════════════
 function buildUnifiedBrdFromAnalysis(unifiedReqs, resolutions, projectName, isUpdateMode) {
   const frs = unifiedReqs.functional_requirements || [];
@@ -219,14 +233,15 @@ function buildUnifiedBrdFromAnalysis(unifiedReqs, resolutions, projectName, isUp
   const existingCount = frs.filter(r => r.status === 'existing').length;
 
   const execSummary = isUpdateMode
-    ? `This is Version 2.0 of the Business Requirements Document, updated with new data from additional communication sources. The original document has been preserved and enhanced with ${newCount} new requirement(s)${modifiedCount > 0 ? ` and ${modifiedCount} modified requirement(s)` : ''}.\n\nThe project "${projectName || unifiedReqs.project_title}" now encompasses ${frs.length} functional requirements (${existingCount} existing, ${newCount} new) and ${nfrs.length} non-functional requirements. ${Object.keys(resolutions).length > 0 ? `${Object.keys(resolutions).length} conflict(s) between the existing BRD and new sources were resolved by the project stakeholders.` : 'No conflicts were detected between the existing BRD and new data.'}`
-    : `This Business Requirements Document consolidates requirements gathered from multiple communication sources including emails, chat conversations, meeting transcripts, and uploaded documents. The AI-powered analysis pipeline has identified, deduplicated, and unified all requirements into a single coherent document.\n\nThe project "${projectName || unifiedReqs.project_title}" encompasses ${frs.length} functional requirements and ${nfrs.length} non-functional requirements. ${Object.keys(resolutions).length > 0 ? `${Object.keys(resolutions).length} conflict(s) between sources were identified and resolved by the project stakeholders.` : 'No conflicts were detected between the sources.'}`;
+    ? `This is Version 2.0 of the Business Requirements Document, updated with new data. The original document has been preserved and enhanced with ${newCount} new requirement(s)${modifiedCount > 0 ? ` and ${modifiedCount} modified requirement(s)` : ''}.\n\nThe project "${projectName || unifiedReqs.project_title}" now encompasses ${frs.length} functional requirements (${existingCount} existing, ${newCount} new) and ${nfrs.length} non-functional requirements.`
+    : `This Business Requirements Document consolidates requirements gathered from multiple communication sources. The GPT-OSS-120B + DeepSeek dual-model AI pipeline has identified, deduplicated, and unified all requirements into a single coherent document.\n\nThe project "${projectName || unifiedReqs.project_title}" encompasses ${frs.length} functional requirements and ${nfrs.length} non-functional requirements.`;
 
   return {
     title: isUpdateMode ? 'Business Requirements Document (Updated v2.0)' : 'Business Requirements Document',
     project_name: projectName || unifiedReqs.project_title || 'Software Project',
     executive_summary: execSummary,
-    project_scope: `The project covers the development of a comprehensive ${(projectName || unifiedReqs.project_title || '').toLowerCase()} with core user-facing features and administrative capabilities. Requirements have been extracted from ${frs.length > 0 ? 'real stakeholder communications' : 'provided inputs'} and prioritized using the MoSCoW framework.`,
+    project_scope: `The project covers the development of a comprehensive ${(projectName || unifiedReqs.project_title || '').toLowerCase()} with core user-facing features and administrative capabilities.`,
+    stakeholders: actors.map(a => a.name),
     actors,
     functional_requirements: frs.map((fr, i) => ({
       id: fr.id || `FR-${String(i + 1).padStart(3, '0')}`,
@@ -240,17 +255,20 @@ function buildUnifiedBrdFromAnalysis(unifiedReqs, resolutions, projectName, isUp
       { id: 'NFR-003', description: 'All data encrypted using TLS 1.3', priority: 'High' },
       { id: 'NFR-004', description: 'System shall maintain 99.9% uptime SLA', priority: 'Medium' },
     ],
+    decisions_and_approvals: [],
+    timelines_and_milestones: [],
+    feature_prioritization: frs.slice(0, 8).map(fr => ({ feature: fr.description, priority: fr.priority || 'Medium' })),
     moscow: unifiedReqs.moscow || {
       must_have: highFRs.slice(0, 4),
       should_have: medFRs.slice(0, 3),
       could_have: lowFRs.slice(0, 3),
       wont_have: ['Mobile native app (v1)', 'AI chatbot', 'Offline mode'],
     },
+    risks_or_issues: [],
     assumptions: [
       'Users have access to modern web browsers.',
       'Required third-party APIs will be available and stable.',
       'Development team has necessary technical expertise.',
-      'Requirements consolidated from multiple sources represent stakeholder consensus.',
     ],
     constraints: [
       'Project must be delivered within the agreed timeline.',
@@ -294,18 +312,38 @@ function buildRequirementsSummary(messages) {
 }
 
 async function generateBrdWithDeepSeek(requirementsSummary, hasMessages) {
-  const systemPrompt = `You are a senior Business Analyst. Generate a comprehensive, professional Business Requirements Document (BRD) from the provided requirements data.\n\nReturn ONLY a valid JSON object (no markdown, no code fences) with this structure:\n{\n  "title": "Project title",\n  "project_name": "Project name",\n  "executive_summary": "2-3 paragraph executive summary",\n  "project_scope": "Detailed project scope description",\n  "actors": [{"name": "...", "description": "..."}],\n  "functional_requirements": [\n    {"id": "FR-001", "description": "...", "priority": "High/Medium/Low", "category": "..."}\n  ],\n  "non_functional_requirements": [\n    {"id": "NFR-001", "description": "...", "priority": "High/Medium/Low"}\n  ],\n  "moscow": {\n    "must_have": ["..."],\n    "should_have": ["..."],\n    "could_have": ["..."],\n    "wont_have": ["..."]\n  },\n  "assumptions": ["..."],\n  "constraints": ["..."],\n  "acceptance_criteria": ["..."]\n}`;
+  const prompt = `You are a senior Business Analyst. Generate a comprehensive BRD.
 
-  const userMsg = hasMessages
-    ? `Generate a BRD from these collected requirements:\n\n${JSON.stringify(requirementsSummary, null, 2)}`
-    : `Generate a sample/demo BRD for a modern web application project.`;
+Return ONLY a valid JSON object (no markdown, no code fences) with this structure:
+{
+  "title": "Project title",
+  "project_name": "Project name",
+  "executive_summary": "2-3 paragraph executive summary",
+  "project_scope": "Detailed project scope description",
+  "stakeholders": ["..."],
+  "actors": [{"name": "...", "description": "..."}],
+  "functional_requirements": [{"id": "FR-001", "description": "...", "priority": "High/Medium/Low", "category": "..."}],
+  "non_functional_requirements": [{"id": "NFR-001", "description": "...", "priority": "High/Medium/Low"}],
+  "decisions_and_approvals": ["..."],
+  "timelines_and_milestones": ["..."],
+  "feature_prioritization": [{"feature": "...", "priority": "High/Medium/Low"}],
+  "moscow": {"must_have": ["..."], "should_have": ["..."], "could_have": ["..."], "wont_have": ["..."]},
+  "risks_or_issues": ["..."],
+  "assumptions": ["..."],
+  "constraints": ["..."],
+  "acceptance_criteria": ["..."]
+}
+
+${hasMessages
+  ? `Generate a BRD from these collected requirements:\n\n${JSON.stringify(requirementsSummary, null, 2)}`
+  : `Generate a sample/demo BRD for a modern web application project.`}`;
 
   const response = await fetch(DEEPSEEK_URL, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${DEEPSEEK_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: 'deepseek-chat',
-      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userMsg }],
+      model: DEEPSEEK_MODEL,
+      messages: [{ role: 'user', content: prompt }],
       temperature: 0.4,
       max_tokens: 6000,
     }),
@@ -315,17 +353,9 @@ async function generateBrdWithDeepSeek(requirementsSummary, hasMessages) {
 
   const data = await response.json();
   const content = data.choices?.[0]?.message?.content || '';
-  let jsonStr = content;
-  const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (jsonMatch) jsonStr = jsonMatch[1];
-  try {
-    return JSON.parse(jsonStr.trim());
-  } catch {
-    const start = content.indexOf('{');
-    const end = content.lastIndexOf('}');
-    if (start !== -1 && end !== -1) return JSON.parse(content.slice(start, end + 1));
-    throw new Error('Could not parse DeepSeek BRD response');
-  }
+  const parsed = safeParseJSON(content);
+  if (!parsed) throw new Error('Could not parse DeepSeek BRD response');
+  return parsed;
 }
 
 function generateSmartBrd(data) {
@@ -359,8 +389,9 @@ function generateSmartBrd(data) {
   return {
     title: 'Demo Business Requirements Document',
     project_name: 'Demo Project (Fallback)',
-    executive_summary: 'Because connecting to the database and DeepSeek failed, this is a fallback DEMO BRD. To get your actual project BRD, run the Auto-Generate pipeline as it bypasses the DB if needed.',
+    executive_summary: 'This is a fallback DEMO BRD. To get your actual project BRD, run the Auto-Generate pipeline which uses GPT-OSS-120B + DeepSeek.',
     project_scope: 'Full-stack web application with responsive frontend, API backend, MongoDB, and third-party integrations.',
+    stakeholders: actors.map(a => a.name),
     actors,
     functional_requirements: functionalReqs,
     non_functional_requirements: [
@@ -369,12 +400,16 @@ function generateSmartBrd(data) {
       { id: 'NFR-003', description: 'TLS 1.3 encryption', priority: 'High' },
       { id: 'NFR-004', description: '99.9% uptime SLA', priority: 'Medium' },
     ],
+    decisions_and_approvals: [],
+    timelines_and_milestones: [],
+    feature_prioritization: functionalReqs.slice(0, 6).map(fr => ({ feature: fr.description, priority: fr.priority })),
     moscow: {
       must_have: highFRs.slice(0, 4),
       should_have: medFRs.slice(0, 3),
       could_have: lowFRs.slice(0, 3),
       wont_have: ['Mobile native app (v1)', 'AI chatbot', 'Offline mode'],
     },
+    risks_or_issues: [],
     assumptions: ['Modern browsers available', 'APIs stable', 'Team has Next.js expertise'],
     constraints: ['Academic timeline', 'Free-tier services', 'GDPR compliance'],
     acceptance_criteria: ['Users can register & login', 'Admin dashboard works', 'Payments complete in 5s', 'Load test passes'],

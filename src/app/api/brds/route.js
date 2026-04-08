@@ -5,10 +5,15 @@ import Brd from '@/models/Brd';
 
 export async function GET() {
   try {
-    const db = await connectDB();
+    let db = null;
+    try {
+      db = await connectDB();
+    } catch (dbErr) {
+      console.warn('[brds] MongoDB unavailable:', dbErr.message);
+    }
 
     if (!db) {
-      // Return demo data when MongoDB is not configured
+      // Return demo data when MongoDB is not configured or unavailable
       return NextResponse.json({
         stats: {
           messagesProcessed: 24,
@@ -83,3 +88,4 @@ export async function GET() {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
+

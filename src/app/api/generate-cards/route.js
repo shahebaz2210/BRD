@@ -1,5 +1,10 @@
+// ════════════════════════════════════════════════════════════════
+//  GENERATE CARDS — POST /api/generate-cards
+//  Stage 1: GPT-OSS-120B extracts structured cards from raw data
+// ════════════════════════════════════════════════════════════════
+
 import { NextResponse } from 'next/server';
-import { filterRelevantData, generateCards } from '@/lib/llmLocal';
+import { extractCards } from '@/lib/llmUnified';
 
 export async function POST(request) {
   try {
@@ -14,27 +19,18 @@ export async function POST(request) {
     }
 
     const startTime = Date.now();
-    console.log(`\n[generate-cards] ═══ Stage 1: Filtering started for "${project}" ═══`);
+    console.log(`\n[generate-cards] ═══ GPT-OSS card extraction for "${project}" ═══`);
 
-    let filteredData;
-    try {
-      filteredData = await filterRelevantData(data, project, description || '');
-    } catch (err) {
-      console.warn('[generate-cards] Mistral filtering failed, using raw data:', err.message);
-      filteredData = data; 
-    }
-
-    console.log('[generate-cards] Stage 2: Generating structured cards...');
     let cards;
     try {
-      cards = await generateCards(filteredData, project);
+      cards = await extractCards(data, project, description || '');
     } catch (err) {
-      console.warn('[generate-cards] Card generation failed:', err.message);
-      cards = [];
+      console.error('[generate-cards] GPT-OSS extraction failed:', err.message);
+      return NextResponse.json({ error: err.message || 'Card extraction failed' }, { status: 500 });
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[generate-cards] ═══ Cards complete in ${elapsed}s ═══\n`);
+    console.log(`[generate-cards] ═══ ${cards.length} cards in ${elapsed}s ═══\n`);
 
     return NextResponse.json({
       success: true,
@@ -43,7 +39,6 @@ export async function POST(request) {
         project,
         description: description || '',
         inputChars: data.length,
-        filteredChars: filteredData.length,
         cardCount: cards.length,
         pipelineDurationSeconds: parseFloat(elapsed),
       },
